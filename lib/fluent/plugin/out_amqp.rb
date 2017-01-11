@@ -41,6 +41,18 @@ module Fluent
     config_param :tls_ca_certificates, :array, :default => nil
     config_param :tls_verify_peer, :bool, :default => true
 
+    config_section :header, param_name: :headers, multi: true, required: false do
+      config_param :name, :string
+      config_param :path, default: nil do |val|
+        if val.start_with?('[')
+          JSON.load(val)
+        else
+          val.split(',')
+        end
+      end
+      config_param :default, :string, default: nil
+    end
+
     def initialize
       super
       require "bunny"
@@ -90,9 +102,9 @@ module Fluent
       begin
         chunk.msgpack_each do |(tag, time, data)|
           begin
-            data = JSON.dump( data ) unless data.is_a?( String )
-            log.debug "Sending message #{data}, :key => #{routing_key( tag)} :headers => #{headers(tag,time)}"
-            @exch.publish(data, :key => routing_key( tag ), :persistent => @persistent, :headers => headers( tag, time ))
+            string_data = data.is_a?(String) ? string_data : JSON.dump(data)
+            log.debug "Sending message #{string_data}, :key => #{routing_key( tag)} :headers => #{get_message_headers(tag,time, data)}"
+            @exch.publish(string_data, :key => routing_key( tag ), :persistent => @persistent, :headers => get_message_headers( tag, time, data ))
           rescue JSON::GeneratorError => e
             log.error "Failure converting data object to json string: #{e.message}"
             # Debug only - otherwise we may pollute the fluent logs with unparseable events and loop
@@ -122,10 +134,22 @@ module Fluent
       end
     end
 
-    def headers( tag, time )
+    def get_message_headers( tag, time, data )
       {}.tap do |h|
         h[@tag_header] = tag if @tag_header
         h[@time_header] = Time.at(time).utc.to_s if @time_header
+        @headers.each do |header|
+          header_val = header.default if header.default
+          if header.path
+            temp_data = data
+            temp_path = header.path.dup
+            until temp_data.nil? or temp_path.empty?
+              temp_data = temp_data[temp_path.shift]
+            end
+            header_val = temp_data if temp_data
+          end
+          h[header.name] = header_val if header_val
+        end
       end
     end
 
